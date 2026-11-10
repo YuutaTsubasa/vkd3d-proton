@@ -5220,6 +5220,35 @@ void d3d12_command_list_meta_push_descriptor_index(struct d3d12_command_list *li
     VK_CALL(vkCmdPushDataEXT(vk_command_buffer, &push));
 }
 
+/* VKD3D_CHECK_ROOT_VA=1 also checks addresses vkd3d's own meta shaders write
+ * through as raw pointers.  app=true: the address must lie in an application
+ * resource. */
+static bool vkd3d_check_va_enabled(void)
+{
+    static int enabled = -1;
+    char env[8];
+
+    if (enabled == -1)
+        enabled = vkd3d_get_env_var("VKD3D_CHECK_ROOT_VA", env, sizeof(env)) && env[0] == '1';
+    return enabled;
+}
+
+static void d3d12_command_list_check_meta_va(struct d3d12_command_list *list, const char *what,
+        VkDeviceAddress va, bool app)
+{
+    static uint32_t reports;
+
+    if (!vkd3d_check_va_enabled())
+        return;
+    if (va && (!app || vkd3d_va_map_deref(&list->device->memory_allocator.va_map, va)))
+        return;
+    if (vkd3d_atomic_uint32_increment(&reports, vkd3d_memory_order_relaxed) > 200)
+        return;
+    ERR("METAVA: list %p %s va %#"PRIx64" %s.
+", (void *)list, what, va,
+            va ? "not in any allocation" : "zero");
+}
+
 static bool d3d12_command_list_gather_pending_queries(struct d3d12_command_list *list)
 {
     /* TODO allocate arrays from command allocator in case
@@ -5487,6 +5516,9 @@ static bool d3d12_command_list_gather_pending_queries(struct d3d12_command_list 
         args.dst_va = d->heap->va;
         args.src_va = resolve_buffer.va + d->resolve_buffer_offset;
         args.map_va = entry_buffer.va + entry_offset * sizeof(struct query_entry);
+        d3d12_command_list_check_meta_va(list, "query gather dst", args.dst_va, false);
+        d3d12_command_list_check_meta_va(list, "query gather src", args.src_va, false);
+        d3d12_command_list_check_meta_va(list, "query gather map", args.map_va, false);
         args.query_count = d->unique_query_count;
 
         entry_offset += d->virtual_query_count;
@@ -8035,12 +8067,8 @@ static void d3d12_command_list_check_root_va(struct d3d12_command_list *list,
     const struct vkd3d_shader_root_parameter *param = &bindings->root_signature->parameters[index];
     VkDeviceAddress va = bindings->root_descriptors[index].info.va;
     static uint32_t reports;
-    static int enabled = -1;
-    char env[8];
 
-    if (enabled == -1)
-        enabled = vkd3d_get_env_var("VKD3D_CHECK_ROOT_VA", env, sizeof(env)) && env[0] == '1';
-    if (!enabled)
+    if (!vkd3d_check_va_enabled())
         return;
     if (va && vkd3d_va_map_deref(&list->device->memory_allocator.va_map, va))
         return;
@@ -9054,6 +9082,8 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count(struct d3d12_c
     args.indirect_va = indirect_args;
     args.count_va = count_arg;
     args.output_va = scratch->va;
+    d3d12_command_list_check_meta_va(list, "multi dispatch output", args.output_va, false);
+    d3d12_command_list_check_meta_va(list, "multi dispatch args", args.indirect_va, true);
     args.stride_words = stride / sizeof(uint32_t);
     args.max_commands = max_commands;
 
@@ -17602,6 +17632,8 @@ static void d3d12_command_list_resolve_binary_occlusion_queries(struct d3d12_com
 
     args.dst_va = dst_va;
     args.src_va = src_va;
+    d3d12_command_list_check_meta_va(list, "binary query dst", args.dst_va, true);
+    d3d12_command_list_check_meta_va(list, "binary query src", args.src_va, false);
     args.query_count = count;
 
     d3d12_command_list_meta_push_data(list, list->cmd.vk_command_buffer,
