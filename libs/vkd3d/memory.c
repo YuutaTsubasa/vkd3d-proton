@@ -1394,9 +1394,7 @@ static bool d3d12_device_aligns_bda_64k(struct d3d12_device *device)
     /* Only seems to affect Turnip for now at least.
      * TODO: We really should just have an extension for this.
      */
-    /* Mali (r54p1 on Mali-G1) only aligns BDA to 4k as well. */
-    return device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MESA_TURNIP &&
-            device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_ARM_PROPRIETARY;
+    return device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MESA_TURNIP;
 }
 
 static HRESULT vkd3d_memory_allocation_init(struct vkd3d_memory_allocation *allocation, struct d3d12_device *device,
@@ -1698,7 +1696,7 @@ static HRESULT vkd3d_memory_allocation_init(struct vkd3d_memory_allocation *allo
             if (info->memory_requirements.alignment &&
                 (allocation->resource.va + allocation->realignment_offset) & (required_alignment - 1))
             {
-                FIXME("Requested alignment of %"PRIx64", but got GPU VA of %"PRIx64" for intended start of heap, "
+                FIXME_ONCE("Requested alignment of %"PRIx64", but got GPU VA of %"PRIx64" for intended start of heap, "
                      "which is not aligned as expected. "
                      "If application relies on this alignment, weird things might happen.\n",
                      required_alignment, allocation->resource.va + allocation->realignment_offset);
