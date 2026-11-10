@@ -8026,6 +8026,34 @@ static void d3d12_command_list_update_root_constants(struct d3d12_command_list *
     }
 }
 
+/* VKD3D_CHECK_ROOT_VA=1: log raw-VA root descriptors (passed to shaders as
+ * plain pointers, with no robustness bounds) that are zero or do not point into
+ * a live allocation.  Mali-G1 faults on GPU writes to 0 + offset. */
+static void d3d12_command_list_check_root_va(struct d3d12_command_list *list,
+        struct vkd3d_pipeline_bindings *bindings, unsigned int index)
+{
+    const struct vkd3d_shader_root_parameter *param = &bindings->root_signature->parameters[index];
+    VkDeviceAddress va = bindings->root_descriptors[index].info.va;
+    static uint32_t reports;
+    static int enabled = -1;
+    char env[8];
+
+    if (enabled == -1)
+        enabled = vkd3d_get_env_var("VKD3D_CHECK_ROOT_VA", env, sizeof(env)) && env[0] == '1';
+    if (!enabled)
+        return;
+    if (va && vkd3d_va_map_deref(&list->device->memory_allocator.va_map, va))
+        return;
+    if (vkd3d_atomic_uint32_increment(&reports, vkd3d_memory_order_relaxed) > 200)
+        return;
+
+    ERR("ROOTVA: list %p root signature %p param %u type %u va %#"PRIx64" %s, %s, set %s.\n",
+            (void *)list, (void *)bindings->root_signature, index, param->parameter_type, va,
+            va ? "not in any allocation" : "zero",
+            bindings == &list->compute_bindings ? "compute" : "graphics",
+            (bindings->root_descriptor_active_mask & (1ull << index)) ? "yes" : "never");
+}
+
 static unsigned int d3d12_command_list_fetch_root_descriptor_vas(struct d3d12_command_list *list,
         struct vkd3d_pipeline_bindings *bindings, union vkd3d_root_parameter_data *dst_data)
 {
@@ -8040,6 +8068,7 @@ static unsigned int d3d12_command_list_fetch_root_descriptor_vas(struct d3d12_co
     {
         unsigned int root_parameter_index = vkd3d_bitmask_iter64(&root_descriptor_mask);
         dst_data->root_descriptor_vas[va_idx++] = bindings->root_descriptors[root_parameter_index].info.va;
+        d3d12_command_list_check_root_va(list, bindings, root_parameter_index);
     }
 
     return va_idx;
