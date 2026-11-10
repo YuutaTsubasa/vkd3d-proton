@@ -5244,8 +5244,7 @@ static void d3d12_command_list_check_meta_va(struct d3d12_command_list *list, co
         return;
     if (vkd3d_atomic_uint32_increment(&reports, vkd3d_memory_order_relaxed) > 200)
         return;
-    ERR("METAVA: list %p %s va %#"PRIx64" %s.
-", (void *)list, what, va,
+    ERR("METAVA: list %p %s va %#"PRIx64" %s.\n", (void *)list, what, va,
             va ? "not in any allocation" : "zero");
 }
 
