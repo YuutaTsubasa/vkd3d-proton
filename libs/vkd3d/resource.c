@@ -5927,8 +5927,54 @@ void vkd3d_mali_dummy_null_uav_init(struct d3d12_device *device)
             dummy->view = VK_NULL_HANDLE;
     }
 
-    ERR("VKD3D_MALI_DUMMY_NULL_UAV=%d: null buffer descriptors use a %u byte scratch buffer (texel view %s).\n",
-            dummy->mode, VKD3D_MALI_DUMMY_NULL_UAV_SIZE, dummy->view ? "yes" : "no");
+    if (dummy->mode >= 3)
+    {
+        VkImageViewCreateInfo image_view_info;
+        VkMemoryRequirements requirements;
+        VkImageCreateInfo image_info;
+
+        memset(&image_info, 0, sizeof(image_info));
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_R32_SFLOAT;
+        image_info.extent.width = 1;
+        image_info.extent.height = 1;
+        image_info.extent.depth = 1;
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        if (VK_CALL(vkCreateImage(device->vk_device, &image_info, NULL, &dummy->image)) == VK_SUCCESS)
+        {
+            VK_CALL(vkGetImageMemoryRequirements(device->vk_device, dummy->image, &requirements));
+            if (SUCCEEDED(vkd3d_allocate_device_memory(device, requirements.size,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, requirements.memoryTypeBits,
+                    NULL, false, &dummy->image_alloc)) &&
+                    VK_CALL(vkBindImageMemory(device->vk_device, dummy->image,
+                            dummy->image_alloc.vk_memory, 0)) == VK_SUCCESS)
+            {
+                memset(&image_view_info, 0, sizeof(image_view_info));
+                image_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                image_view_info.image = dummy->image;
+                image_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                image_view_info.format = VK_FORMAT_R32_SFLOAT;
+                image_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                image_view_info.subresourceRange.levelCount = 1;
+                image_view_info.subresourceRange.layerCount = 1;
+                if (VK_CALL(vkCreateImageView(device->vk_device, &image_view_info, NULL,
+                        &dummy->image_view)) != VK_SUCCESS)
+                    dummy->image_view = VK_NULL_HANDLE;
+            }
+        }
+    }
+
+    ERR("VKD3D_MALI_DUMMY_NULL_UAV=%d: null buffer descriptors use a %u byte scratch buffer (texel view %s, storage image %s).\n",
+            dummy->mode, VKD3D_MALI_DUMMY_NULL_UAV_SIZE, dummy->view ? "yes" : "no",
+            dummy->image_view ? "yes" : "no");
     return;
 
 fail:
@@ -5941,6 +5987,12 @@ void vkd3d_mali_dummy_null_uav_cleanup(struct d3d12_device *device)
     struct vkd3d_mali_dummy_null_uav *dummy = &device->mali_dummy_null_uav;
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
 
+    if (dummy->image_view)
+        VK_CALL(vkDestroyImageView(device->vk_device, dummy->image_view, NULL));
+    if (dummy->image)
+        VK_CALL(vkDestroyImage(device->vk_device, dummy->image, NULL));
+    if (dummy->image_alloc.vk_memory)
+        vkd3d_free_device_memory(device, &dummy->image_alloc);
     if (dummy->view)
         VK_CALL(vkDestroyBufferView(device->vk_device, dummy->view, NULL));
     if (dummy->buffer)
@@ -5971,6 +6023,15 @@ void vkd3d_mali_dummy_null_uav_fill(const struct d3d12_device *device,
         case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
             if (dummy->view)
                 info->buffer_view = dummy->view;
+            break;
+
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            if (dummy->image_view)
+            {
+                info->image.sampler = VK_NULL_HANDLE;
+                info->image.imageView = dummy->image_view;
+                info->image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            }
             break;
 
         default:
@@ -6033,6 +6094,7 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
     const struct d3d12_null_descriptor_template *null_descriptor_template;
     union vkd3d_descriptor_info dummy_infos[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
     union vkd3d_descriptor_info dummy_views[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
+    union vkd3d_descriptor_info dummy_images[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
     VkWriteDescriptorSet writes[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
     const struct vkd3d_vk_device_procs *vk_procs;
     struct vkd3d_bindless_state *bindless_state;
@@ -6092,8 +6154,11 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
                 vkd3d_mali_dummy_null_uav_fill(desc.heap->device, writes[i].descriptorType, &dummy_infos[i]);
                 dummy_views[i].buffer_view = *writes[i].pTexelBufferView;
                 vkd3d_mali_dummy_null_uav_fill(desc.heap->device, writes[i].descriptorType, &dummy_views[i]);
+                dummy_images[i].image = *writes[i].pImageInfo;
+                vkd3d_mali_dummy_null_uav_fill(desc.heap->device, writes[i].descriptorType, &dummy_images[i]);
                 writes[i].pBufferInfo = &dummy_infos[i].buffer;
                 writes[i].pTexelBufferView = &dummy_views[i].buffer_view;
+                writes[i].pImageInfo = &dummy_images[i].image;
             }
         }
 
@@ -9808,6 +9873,9 @@ static void d3d12_descriptor_heap_zero_initialize(struct d3d12_descriptor_heap *
     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
         image_infos = vkd3d_calloc(descriptor_count, sizeof(*image_infos));
         write.pImageInfo = image_infos;
+        for (i = 0; i < descriptor_count; i++)
+            vkd3d_mali_dummy_null_uav_fill(device, vk_descriptor_type,
+                    (union vkd3d_descriptor_info *)&image_infos[i]);
         break;
 
     case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:

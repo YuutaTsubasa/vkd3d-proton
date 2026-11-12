@@ -1606,7 +1606,7 @@ union vkd3d_descriptor_info
 
 /* VKD3D_MALI_DUMMY_NULL_UAV: point null buffer descriptors at a real scratch
  * buffer instead of VK_NULL_HANDLE (nullDescriptor).  1: storage / uniform
- * buffers, 2: also texel buffers.  Mali-G1 test: the GPU faults are writes to
+ * buffers, 2: also texel buffers, 3: also storage images (1x1 2D R32_SFLOAT).  Mali-G1 test: the GPU faults are writes to
  * NULL + small offset. */
 struct vkd3d_mali_dummy_null_uav
 {
@@ -1614,6 +1614,9 @@ struct vkd3d_mali_dummy_null_uav
     VkBuffer buffer;
     VkBufferView view;
     struct vkd3d_device_memory_allocation alloc;
+    VkImage image;
+    VkImageView image_view;
+    struct vkd3d_device_memory_allocation image_alloc;
 };
 
 #define VKD3D_MALI_DUMMY_NULL_UAV_SIZE (64 * 1024)
