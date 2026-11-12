@@ -1604,6 +1604,25 @@ union vkd3d_descriptor_info
     VkDeviceAddress va;
 };
 
+/* VKD3D_MALI_DUMMY_NULL_UAV: point null buffer descriptors at a real scratch
+ * buffer instead of VK_NULL_HANDLE (nullDescriptor).  1: storage / uniform
+ * buffers, 2: also texel buffers.  Mali-G1 test: the GPU faults are writes to
+ * NULL + small offset. */
+struct vkd3d_mali_dummy_null_uav
+{
+    int mode;
+    VkBuffer buffer;
+    VkBufferView view;
+    struct vkd3d_device_memory_allocation alloc;
+};
+
+#define VKD3D_MALI_DUMMY_NULL_UAV_SIZE (64 * 1024)
+
+void vkd3d_mali_dummy_null_uav_init(struct d3d12_device *device);
+void vkd3d_mali_dummy_null_uav_cleanup(struct d3d12_device *device);
+void vkd3d_mali_dummy_null_uav_fill(const struct d3d12_device *device,
+        VkDescriptorType vk_descriptor_type, union vkd3d_descriptor_info *info);
+
 /* ID3D12DescriptorHeap */
 struct d3d12_null_descriptor_template
 {
@@ -5865,6 +5884,7 @@ struct d3d12_device
     struct vkd3d_memory_transfer_queue memory_transfers;
     struct vkd3d_memory_allocator memory_allocator;
     struct vkd3d_null_rtas_allocation null_rtas_allocation;
+    struct vkd3d_mali_dummy_null_uav mali_dummy_null_uav;
 
     struct vkd3d_queue *internal_sparse_queue;
     VkSemaphore sparse_init_timeline;

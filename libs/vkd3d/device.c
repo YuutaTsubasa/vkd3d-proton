@@ -3942,6 +3942,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
     d3d12_device_destroy_vkd3d_queues(device);
     VK_CALL(vkDestroySemaphore(device->vk_device, device->sparse_init_timeline, NULL));
     vkd3d_null_rtas_allocation_cleanup(&device->null_rtas_allocation, device);
+    vkd3d_mali_dummy_null_uav_cleanup(device);
     vkd3d_memory_allocator_cleanup(&device->memory_allocator, device);
     vkd3d_memory_transfer_queue_cleanup(&device->memory_transfers);
     vkd3d_global_descriptor_buffer_cleanup(&device->global_descriptor_buffer, device);
@@ -10654,6 +10655,8 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
 
     if (FAILED(hr = vkd3d_global_descriptor_buffer_init(&device->global_descriptor_buffer, device)))
         goto out_cleanup_memory_info;
+
+    vkd3d_mali_dummy_null_uav_init(device);
 
     if (FAILED(hr = vkd3d_bindless_state_init(&device->bindless_state, device)))
         goto out_cleanup_global_descriptor_buffer;

@@ -5886,6 +5886,98 @@ static inline void vkd3d_init_write_descriptor_set(VkWriteDescriptorSet *vk_writ
     vk_write->pTexelBufferView = &info->buffer_view;
 }
 
+void vkd3d_mali_dummy_null_uav_init(struct d3d12_device *device)
+{
+    struct vkd3d_mali_dummy_null_uav *dummy = &device->mali_dummy_null_uav;
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkBufferViewCreateInfo view_info;
+    const char *env;
+    void *ptr;
+
+    memset(dummy, 0, sizeof(*dummy));
+    if (!(env = getenv("VKD3D_MALI_DUMMY_NULL_UAV")) || !(dummy->mode = atoi(env)))
+        return;
+
+    if (FAILED(vkd3d_create_buffer_explicit_usage(device,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+            VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VKD3D_MALI_DUMMY_NULL_UAV_SIZE, "mali-dummy-null-uav", &dummy->buffer)))
+        goto fail;
+
+    if (FAILED(vkd3d_allocate_internal_buffer_memory(device, dummy->buffer,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 0, &dummy->alloc)))
+        goto fail;
+
+    if (VK_CALL(vkMapMemory(device->vk_device, dummy->alloc.vk_memory, 0, VK_WHOLE_SIZE, 0, &ptr)) == VK_SUCCESS)
+    {
+        memset(ptr, 0, VKD3D_MALI_DUMMY_NULL_UAV_SIZE);
+        VK_CALL(vkUnmapMemory(device->vk_device, dummy->alloc.vk_memory));
+    }
+
+    if (dummy->mode >= 2)
+    {
+        memset(&view_info, 0, sizeof(view_info));
+        view_info.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+        view_info.buffer = dummy->buffer;
+        view_info.format = VK_FORMAT_R32_UINT;
+        view_info.offset = 0;
+        view_info.range = VK_WHOLE_SIZE;
+        if (VK_CALL(vkCreateBufferView(device->vk_device, &view_info, NULL, &dummy->view)) != VK_SUCCESS)
+            dummy->view = VK_NULL_HANDLE;
+    }
+
+    ERR("VKD3D_MALI_DUMMY_NULL_UAV=%d: null buffer descriptors use a %u byte scratch buffer (texel view %s).\n",
+            dummy->mode, VKD3D_MALI_DUMMY_NULL_UAV_SIZE, dummy->view ? "yes" : "no");
+    return;
+
+fail:
+    ERR("VKD3D_MALI_DUMMY_NULL_UAV: failed to create the scratch buffer.\n");
+    vkd3d_mali_dummy_null_uav_cleanup(device);
+}
+
+void vkd3d_mali_dummy_null_uav_cleanup(struct d3d12_device *device)
+{
+    struct vkd3d_mali_dummy_null_uav *dummy = &device->mali_dummy_null_uav;
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+
+    if (dummy->view)
+        VK_CALL(vkDestroyBufferView(device->vk_device, dummy->view, NULL));
+    if (dummy->buffer)
+        VK_CALL(vkDestroyBuffer(device->vk_device, dummy->buffer, NULL));
+    if (dummy->alloc.vk_memory)
+        vkd3d_free_device_memory(device, &dummy->alloc);
+    memset(dummy, 0, sizeof(*dummy));
+}
+
+void vkd3d_mali_dummy_null_uav_fill(const struct d3d12_device *device,
+        VkDescriptorType vk_descriptor_type, union vkd3d_descriptor_info *info)
+{
+    const struct vkd3d_mali_dummy_null_uav *dummy = &device->mali_dummy_null_uav;
+
+    if (!dummy->buffer)
+        return;
+
+    switch (vk_descriptor_type)
+    {
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            info->buffer.buffer = dummy->buffer;
+            info->buffer.offset = 0;
+            info->buffer.range = VKD3D_MALI_DUMMY_NULL_UAV_SIZE;
+            break;
+
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            if (dummy->view)
+                info->buffer_view = dummy->view;
+            break;
+
+        default:
+            break;
+    }
+}
+
 static void d3d12_descriptor_heap_write_null_descriptor_template_embedded_partial(struct d3d12_device *device,
         vkd3d_cpu_descriptor_va_t desc_va,
         VkDescriptorType vk_descriptor_type, size_t payload_offset, size_t size)
@@ -5939,6 +6031,8 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
      * For MUTABLE, this would normally just be one descriptor set, but
      * we need MUTABLE + STORAGE_BUFFER, or 6 sets for non-mutable :\ */
     const struct d3d12_null_descriptor_template *null_descriptor_template;
+    union vkd3d_descriptor_info dummy_infos[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
+    union vkd3d_descriptor_info dummy_views[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
     VkWriteDescriptorSet writes[VKD3D_MAX_BINDLESS_DESCRIPTOR_SETS];
     const struct vkd3d_vk_device_procs *vk_procs;
     struct vkd3d_bindless_state *bindless_state;
@@ -5991,6 +6085,16 @@ static void d3d12_descriptor_heap_write_null_descriptor_template(vkd3d_cpu_descr
             if (writes[i].descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT)
                 writes[i].descriptorType = vk_mutable_descriptor_type;
             writes[i].dstArrayElement = offset;
+
+            if (desc.heap->device->mali_dummy_null_uav.buffer)
+            {
+                dummy_infos[i].buffer = *writes[i].pBufferInfo;
+                vkd3d_mali_dummy_null_uav_fill(desc.heap->device, writes[i].descriptorType, &dummy_infos[i]);
+                dummy_views[i].buffer_view = *writes[i].pTexelBufferView;
+                vkd3d_mali_dummy_null_uav_fill(desc.heap->device, writes[i].descriptorType, &dummy_views[i]);
+                writes[i].pBufferInfo = &dummy_infos[i].buffer;
+                writes[i].pTexelBufferView = &dummy_views[i].buffer_view;
+            }
         }
 
         if (num_writes)
@@ -6240,6 +6344,7 @@ void d3d12_desc_create_cbv(vkd3d_cpu_descriptor_va_t desc_va,
             null_descriptor_info.buffer.buffer = VK_NULL_HANDLE;
             null_descriptor_info.buffer.offset = 0;
             null_descriptor_info.buffer.range = VK_WHOLE_SIZE;
+            vkd3d_mali_dummy_null_uav_fill(device, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, &null_descriptor_info);
             vkd3d_init_write_descriptor_set(&vk_writes[vk_write_count++], &d, binding,
                     VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, &null_descriptor_info);
         }
@@ -7331,6 +7436,7 @@ static void vkd3d_create_texture_srv(vkd3d_cpu_descriptor_va_t desc_va,
             null_descriptor_info.buffer.buffer = VK_NULL_HANDLE;
             null_descriptor_info.buffer.offset = 0;
             null_descriptor_info.buffer.range = VK_WHOLE_SIZE;
+            vkd3d_mali_dummy_null_uav_fill(device, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &null_descriptor_info);
             vkd3d_init_write_descriptor_set(&vk_writes[vk_write_count++], &d, binding,
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &null_descriptor_info);
         }
@@ -8261,6 +8367,7 @@ static void vkd3d_create_texture_uav(vkd3d_cpu_descriptor_va_t desc_va,
             null_descriptor_info.buffer.buffer = VK_NULL_HANDLE;
             null_descriptor_info.buffer.offset = 0;
             null_descriptor_info.buffer.range = VK_WHOLE_SIZE;
+            vkd3d_mali_dummy_null_uav_fill(device, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &null_descriptor_info);
             vkd3d_init_write_descriptor_set(&vk_writes[vk_write_count++], &d, binding,
                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &null_descriptor_info);
         }
@@ -9708,13 +9815,20 @@ static void d3d12_descriptor_heap_zero_initialize(struct d3d12_descriptor_heap *
         buffer_infos = vkd3d_calloc(descriptor_count, sizeof(*buffer_infos));
         write.pBufferInfo = buffer_infos;
         for (i = 0; i < descriptor_count; i++)
+        {
             buffer_infos[i].range = VK_WHOLE_SIZE;
+            vkd3d_mali_dummy_null_uav_fill(device, vk_descriptor_type,
+                    (union vkd3d_descriptor_info *)&buffer_infos[i]);
+        }
         break;
 
     case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
     case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
         buffer_view_infos = vkd3d_calloc(descriptor_count, sizeof(*buffer_view_infos));
         write.pTexelBufferView = buffer_view_infos;
+        if (device->mali_dummy_null_uav.view)
+            for (i = 0; i < descriptor_count; i++)
+                buffer_view_infos[i] = device->mali_dummy_null_uav.view;
         break;
 
     default:
