@@ -5950,12 +5950,17 @@ void vkd3d_mali_dummy_null_uav_init(struct d3d12_device *device)
 
         if (VK_CALL(vkCreateImage(device->vk_device, &image_info, NULL, &dummy->image)) == VK_SUCCESS)
         {
+            VkBindImageMemoryInfo bind_info;
+
             VK_CALL(vkGetImageMemoryRequirements(device->vk_device, dummy->image, &requirements));
+            memset(&bind_info, 0, sizeof(bind_info));
+            bind_info.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
+            bind_info.image = dummy->image;
             if (SUCCEEDED(vkd3d_allocate_device_memory(device, requirements.size,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, requirements.memoryTypeBits,
                     NULL, false, &dummy->image_alloc)) &&
-                    VK_CALL(vkBindImageMemory(device->vk_device, dummy->image,
-                            dummy->image_alloc.vk_memory, 0)) == VK_SUCCESS)
+                    (bind_info.memory = dummy->image_alloc.vk_memory) &&
+                    VK_CALL(vkBindImageMemory2(device->vk_device, 1, &bind_info)) == VK_SUCCESS)
             {
                 memset(&image_view_info, 0, sizeof(image_view_info));
                 image_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
